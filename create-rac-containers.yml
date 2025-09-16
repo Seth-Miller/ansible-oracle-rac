@@ -1,0 +1,121 @@
+---
+- name: Create Oracle Database RAC containers
+  hosts: localhost
+
+
+  tasks:
+  - name: Create public network
+    containers.podman.podman_network:
+      name: rac_pub1_nw
+      internal: false
+      subnet: 10.0.20.0/24
+
+  - name: Create private network 1
+    containers.podman.podman_network:
+      name: rac_priv1_nw
+      internal: true
+      subnet: 192.168.17.0/24
+      disable_dns: true
+
+  - name: Create private network 2
+    containers.podman.podman_network:
+      name: rac_priv2_nw
+      internal: true
+      subnet: 192.168.18.0/24
+      disable_dns: true
+
+  - name: Create the secrets directory
+    ansible.builtin.file:
+      path: .secrets
+      state: directory
+      mode: '0700'
+
+  - name: Create a password file
+    ansible.builtin.lineinfile:
+      path: .secrets/pwdfile.txt
+      line: "Oracle_4U"
+      create: yes
+      mode: '0600'
+
+  - name: Generate a private key
+    ansible.builtin.command:
+      cmd: openssl genrsa -out .secrets/key.pem
+      creates: .secrets/key.pem
+
+  - name: Generate a public key
+    ansible.builtin.command:
+      cmd: openssl rsa -in .secrets/key.pem -out .secrets/key.pub -pubout
+      creates: .secrets/key.pub
+
+  - name: Create the password key file
+    ansible.builtin.command:
+      cmd: openssl pkeyutl -in .secrets/pwdfile.txt -out .secrets/pwdfile.enc -pubin -inkey .secrets/key.pub -encrypt
+      creates: .secrets/pwdfile.enc
+
+  - name: Remove the password file
+    ansible.builtin.file:
+      path: .secrets/pwdfile.txt
+      state: absent
+
+  - name: Create password key file secret
+    containers.podman.podman_secret:
+      name: pwdsecret
+      path: .secrets/pwdfile.enc
+
+  - name: Create private key secret
+    containers.podman.podman_secret:
+      name: keysecret
+      path: .secrets/key.pem
+
+  - name: Run container
+    containers.podman.podman_container:
+      name: racnodep1
+      hostname: racnodep1
+      image: container-registry.oracle.com/database/rac_ru:latest
+      state: started
+      dns_search: "example.info"
+      dns: 10.0.20.25
+      shm_size: 4G
+      cpuset_cpus: 0-1
+      memory: 16G
+      memory_swap: 32G
+      sysctl: {
+        "kernel.shmall": "2097152",
+        "kernel.sem": "250 32000 100 128",
+        "kernel.shmmax": "8589934592",
+        "kernel.shmmni": "4096",
+        "net.ipv4.conf.eth1.rp_filter": "2",
+        "net.ipv4.conf.eth2.rp_filter": "2",
+        }
+      cap_add:
+        - SYS_RESOURCE
+        - NET_ADMIN
+        - SYS_NICE
+        - AUDIT_WRITE
+        - AUDIT_CONTROL
+        - NET_RAW
+      secrets:
+        - pwdsecret
+        - keysecret
+      health_cmd: "/bin/python3 /opt/scripts/startup/scripts/main.py --checkracstatus"
+      env: {
+        "DNS_SERVERS": "10.0.20.25",
+        "DB_SERVICE": "service:soepdb",
+        "CRS_PRIVATE_IP1": "192.168.17.170",
+        "CRS_PRIVATE_IP2": "192.168.18.170",
+        "CRS_NODES": "\"pubhost:racnodep1,viphost:racnodep1-vip;pubhost:racnodep2,viphost:racnodep2-vip\"",
+        "SCAN_NAME": "racnodepc1-scan",
+        "INIT_SGA_SIZE": "3G",
+        "INIT_PGA_SIZE": "2G",
+        "INSTALL_NODE": "racnodep1",
+        "DB_PWD_FILE": "pwdsecret",
+        "PWD_KEY": "keysecret",
+        "CRS_ASM_DEVICE_LIST": "/dev/asm-disk1,/dev/asm-disk2",
+        "OP_TYPE": "setuprac",
+        }
+      device:
+        - /dev/sdb:/dev/asm_disk1
+        - /dev/sdc:/dev/asm_disk2
+      restart_policy: always
+      ulimit: rtprio=99 
+      systemd: always
